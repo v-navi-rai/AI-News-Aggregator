@@ -1,0 +1,72 @@
+from fastapi import FastAPI, Query, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from dotenv import load_dotenv
+from get_news_agent import get_news
+from agent import executor
+from tools import extract_article_text, summarize_text, translate_text
+import logging
+import re
+
+logging.basicConfig(level=logging.DEBUG)  # Set to DEBUG for more detail
+logger = logging.getLogger(__name__)
+
+# Load environment variables3
+load_dotenv()
+
+app = FastAPI()
+
+# Add CORS middleware to allow React frontend requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/")
+def read_root():
+    """Root endpoint to confirm the API is running."""
+    return {"message": "Intelligent News API. Use /news to fetch articles or /query for summarization/translation."}
+
+@app.get("/news")
+def news(category: str = Query(None)):
+    """Fetch news articles using the LangChain agent for the specified category."""
+    return get_news(category)
+
+class QueryInput(BaseModel):
+    input: str
+
+@app.post("/query")
+async def query_agent(data: QueryInput):
+    """Process summarization and translation queries using the agent."""
+    try:
+        translation_match = re.match(
+            r"Translate this text to\s+(.+?):\s*(.+)$",
+            data.input,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if translation_match:
+            target_language = translation_match.group(1).strip()
+            source_text = translation_match.group(2).strip()
+            translated_text = translate_text(source_text, target_language)
+            if translated_text.startswith("Error:"):
+                raise HTTPException(status_code=502, detail=translated_text)
+            return {"output": translated_text}
+
+        
+
+        article_match = re.search(r"Summarize this article:\s*(https?://\S+)", data.input, re.IGNORECASE)
+        if article_match:
+            article_text = extract_article_text(article_match.group(1))
+            if article_text.startswith("Error:"):
+                raise HTTPException(status_code=502, detail=article_text)
+            return {"output": summarize_text(article_text)}
+
+        result = executor.invoke({"input": data.input})
+        return {"output": result["output"]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing query: {e or type(e).__name__}")
